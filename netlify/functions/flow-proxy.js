@@ -1,5 +1,7 @@
 // netlify/functions/flow-proxy.js
+// Revisi: versi marker + debug kuat + fallback URL n8n + CORS + timeout + bypass env (agar tidak lagi "env not set")
 
+const VERSION = "v3-2026-01-29-REV"; // <-- ubah kalau mau tracking deploy
 const DEFAULT_N8N_WEBHOOK_URL =
   "https://flow.eraenterprise.id/webhook/eramed-clara-appsmith";
 
@@ -32,6 +34,11 @@ function getRawBody(event) {
   return event.body;
 }
 
+// Helper: get query param
+function qp(event, key) {
+  return event?.queryStringParameters?.[key];
+}
+
 export const handler = async (event) => {
   const method = event.httpMethod || "GET";
 
@@ -44,26 +51,37 @@ export const handler = async (event) => {
     };
   }
 
-  // 2) GET: simple health check + info (so browser won't show error)
-  if (method === "GET") {
-    const envUrl = (process.env.N8N_WEBHOOK_URL || "").trim();
-    const chosenUrl = envUrl || DEFAULT_N8N_WEBHOOK_URL;
+  // Read env safely
+  const envUrlRaw = (process.env.N8N_WEBHOOK_URL || "").trim();
 
-    // debug=1 will show which URL is used (safe in your case)
-    const debug = event.queryStringParameters?.debug === "1";
+  /**
+   * Revisi penting:
+   * - Selalu ada fallback DEFAULT_N8N_WEBHOOK_URL (jadi tidak akan error "env not set" lagi)
+   * - Bisa override target via query param `target` untuk testing (optional)
+   */
+  const targetOverride = (qp(event, "target") || "").trim();
+  const chosenUrl = targetOverride || envUrlRaw || DEFAULT_N8N_WEBHOOK_URL;
+
+  // 2) GET: health check + debug info
+  if (method === "GET") {
+    const debug = qp(event, "debug") === "1";
 
     return {
       statusCode: 200,
       headers: baseHeaders(),
       body: JSON.stringify({
         ok: true,
-        message:
-          "flow-proxy is running. Send a POST JSON to forward to n8n.",
+        version: VERSION,
+        message: "flow-proxy is running. Send a POST JSON to forward to n8n.",
         methodAccepted: ["POST"],
         debug: debug
           ? {
-              envPresent: Boolean(envUrl),
+              envPresent: Boolean(envUrlRaw),
+              envUrlRaw: envUrlRaw || null,
+              targetOverride: targetOverride || null,
               chosenUrl,
+              note:
+                "If you still see old behavior, you are hitting an older deploy. Use deploy-specific URL from Netlify deploy hash.",
             }
           : undefined,
       }),
@@ -77,16 +95,13 @@ export const handler = async (event) => {
       headers: baseHeaders(),
       body: JSON.stringify({
         ok: false,
+        version: VERSION,
         error: `Method ${method} not allowed. Use POST.`,
       }),
     };
   }
 
-  // 4) Choose target URL (ENV or fallback)
-  const envUrl = (process.env.N8N_WEBHOOK_URL || "").trim();
-  const url = envUrl || DEFAULT_N8N_WEBHOOK_URL;
-
-  // 5) Parse incoming JSON body (optional; allow empty body)
+  // 4) Parse incoming JSON body (optional; allow empty body)
   const rawBody = getRawBody(event);
   let payload = {};
 
@@ -98,6 +113,7 @@ export const handler = async (event) => {
         headers: baseHeaders(),
         body: JSON.stringify({
           ok: false,
+          version: VERSION,
           error: "Invalid JSON body",
           detail: parsed.error,
         }),
@@ -106,18 +122,19 @@ export const handler = async (event) => {
     payload = parsed.value ?? {};
   }
 
-  // 6) Forward to n8n with timeout
+  // 5) Forward to n8n with timeout
   const controller = new AbortController();
-  const timeoutMs = 12000;
+  const timeoutMs = 15000;
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(url, {
+    const res = await fetch(chosenUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         source: "netlify",
         receivedAt: new Date().toISOString(),
+        version: VERSION,
         ...payload,
       }),
       signal: controller.signal,
@@ -126,7 +143,7 @@ export const handler = async (event) => {
     const resText = await res.text();
     clearTimeout(t);
 
-    // Try to preserve n8n response if it's JSON; otherwise return as text
+    // Preserve n8n response if JSON; otherwise return as text
     const maybeJson = safeJsonParse(resText);
     const bodyOut = maybeJson.ok
       ? maybeJson.value
@@ -134,7 +151,9 @@ export const handler = async (event) => {
 
     return {
       statusCode: res.status,
-      headers: baseHeaders(),
+      headers: baseHeaders({
+        "x-flow-proxy-version": VERSION,
+      }),
       body: JSON.stringify(bodyOut),
     };
   } catch (e) {
@@ -146,12 +165,19 @@ export const handler = async (event) => {
 
     return {
       statusCode: 502,
-      headers: baseHeaders(),
+      headers: baseHeaders({
+        "x-flow-proxy-version": VERSION,
+      }),
       body: JSON.stringify({
         ok: false,
+        version: VERSION,
         error: "Failed to call n8n",
         detail: msg,
-        envPresent: Boolean(envUrl), // helps diagnose Netlify ENV issues
+        debug: {
+          envPresent: Boolean(envUrlRaw),
+          targetOverride: targetOverride || null,
+          chosenUrl,
+        },
       }),
     };
   }
