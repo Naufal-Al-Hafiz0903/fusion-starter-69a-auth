@@ -1,11 +1,15 @@
 // netlify/functions/flow-proxy.js
-// Revisi: versi marker + debug kuat + fallback URL n8n + CORS + timeout + bypass env (agar tidak lagi "env not set")
+// Revisi utama:
+// - Tidak lagi gagal kalau body bukan JSON (tidak return 400)
+// - Coba parse JSON, kalau gagal -> coba parse form-urlencoded, kalau gagal -> kirim rawBody
+// - Tetap forward ke n8n dengan payload yang SELALU JSON valid
+// - GET debug untuk cek versi + URL yang dipakai
+// - CORS + timeout + response pass-through aman
 
-const VERSION = "v3-2026-01-29-REV"; // <-- ubah kalau mau tracking deploy
+const VERSION = "v4-2026-01-29-FIX";
 const DEFAULT_N8N_WEBHOOK_URL =
   "https://flow.eraenterprise.id/webhook/eramed-clara-appsmith";
 
-// Helper: build common headers (CORS + JSON)
 function baseHeaders(extra = {}) {
   return {
     "content-type": "application/json; charset=utf-8",
@@ -16,7 +20,6 @@ function baseHeaders(extra = {}) {
   };
 }
 
-// Helper: safely parse JSON
 function safeJsonParse(text) {
   try {
     return { ok: true, value: JSON.parse(text) };
@@ -25,7 +28,6 @@ function safeJsonParse(text) {
   }
 }
 
-// Helper: decode body (handle base64)
 function getRawBody(event) {
   if (!event?.body) return "";
   if (event.isBase64Encoded) {
@@ -34,65 +36,61 @@ function getRawBody(event) {
   return event.body;
 }
 
-// Helper: get query param
-function qp(event, key) {
-  return event?.queryStringParameters?.[key];
+function getHeader(event, name) {
+  const h = event?.headers || {};
+  const key = Object.keys(h).find((k) => k.toLowerCase() === name.toLowerCase());
+  return key ? h[key] : "";
+}
+
+function parseFormUrlEncoded(raw) {
+  try {
+    const params = new URLSearchParams(raw);
+    const obj = {};
+    for (const [k, v] of params.entries()) obj[k] = v;
+    return { ok: true, value: obj };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 export const handler = async (event) => {
   const method = event.httpMethod || "GET";
 
-  // 1) Preflight for CORS
+  // CORS preflight
   if (method === "OPTIONS") {
-    return {
-      statusCode: 204,
-      headers: baseHeaders(),
-      body: "",
-    };
+    return { statusCode: 204, headers: baseHeaders(), body: "" };
   }
 
-  // Read env safely
-  const envUrlRaw = (process.env.N8N_WEBHOOK_URL || "").trim();
+  // target URL (ENV atau fallback)
+  const envUrl = (process.env.N8N_WEBHOOK_URL || "").trim();
+  const chosenUrl = envUrl || DEFAULT_N8N_WEBHOOK_URL;
 
-  /**
-   * Revisi penting:
-   * - Selalu ada fallback DEFAULT_N8N_WEBHOOK_URL (jadi tidak akan error "env not set" lagi)
-   * - Bisa override target via query param `target` untuk testing (optional)
-   */
-  const targetOverride = (qp(event, "target") || "").trim();
-  const chosenUrl = targetOverride || envUrlRaw || DEFAULT_N8N_WEBHOOK_URL;
-
-  // 2) GET: health check + debug info
+  // GET: health check
   if (method === "GET") {
-    const debug = qp(event, "debug") === "1";
-
+    const debug = event?.queryStringParameters?.debug === "1";
     return {
       statusCode: 200,
-      headers: baseHeaders(),
+      headers: baseHeaders({ "x-flow-proxy-version": VERSION }),
       body: JSON.stringify({
         ok: true,
         version: VERSION,
-        message: "flow-proxy is running. Send a POST JSON to forward to n8n.",
-        methodAccepted: ["POST"],
+        message: "flow-proxy is running. Send POST to forward to n8n.",
         debug: debug
           ? {
-              envPresent: Boolean(envUrlRaw),
-              envUrlRaw: envUrlRaw || null,
-              targetOverride: targetOverride || null,
+              envPresent: Boolean(envUrl),
+              envUrlRaw: envUrl || null,
               chosenUrl,
-              note:
-                "If you still see old behavior, you are hitting an older deploy. Use deploy-specific URL from Netlify deploy hash.",
             }
           : undefined,
       }),
     };
   }
 
-  // 3) Only allow POST for forwarding
+  // Only POST
   if (method !== "POST") {
     return {
       statusCode: 405,
-      headers: baseHeaders(),
+      headers: baseHeaders({ "x-flow-proxy-version": VERSION }),
       body: JSON.stringify({
         ok: false,
         version: VERSION,
@@ -101,63 +99,77 @@ export const handler = async (event) => {
     };
   }
 
-  // 4) Parse incoming JSON body (optional; allow empty body)
+  // Ambil raw body + content-type
   const rawBody = getRawBody(event);
+  const contentTypeRaw = getHeader(event, "content-type") || "";
+  const contentType = contentTypeRaw.split(";")[0].trim().toLowerCase();
+
+  // Parse body dengan fallback (TIDAK error 400 lagi)
+  let parsedAs = "empty";
   let payload = {};
+  let parseError = null;
 
   if (rawBody) {
-    const parsed = safeJsonParse(rawBody);
-    if (!parsed.ok) {
-      return {
-        statusCode: 400,
-        headers: baseHeaders(),
-        body: JSON.stringify({
-          ok: false,
-          version: VERSION,
-          error: "Invalid JSON body",
-          detail: parsed.error,
-        }),
-      };
+    // 1) coba JSON dulu
+    const j = safeJsonParse(rawBody);
+    if (j.ok) {
+      payload = j.value ?? {};
+      parsedAs = "json";
+    } else {
+      // 2) coba form-urlencoded
+      const f = parseFormUrlEncoded(rawBody);
+      if (f.ok && Object.keys(f.value || {}).length > 0) {
+        payload = f.value;
+        parsedAs = "form-urlencoded";
+      } else {
+        // 3) gagal semua -> kirim raw
+        payload = { rawBody };
+        parsedAs = "raw";
+        parseError = j.error;
+      }
     }
-    payload = parsed.value ?? {};
   }
 
-  // 5) Forward to n8n with timeout
+  // Forward ke n8n (SELALU JSON valid)
   const controller = new AbortController();
   const timeoutMs = 15000;
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    const forwardBody = {
+      source: "netlify",
+      version: VERSION,
+      receivedAt: new Date().toISOString(),
+      contentType: contentType || null,
+      parsedAs,
+      ...(parseError ? { parseError } : {}),
+      payload,
+    };
+
     const res = await fetch(chosenUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        source: "netlify",
-        receivedAt: new Date().toISOString(),
-        version: VERSION,
-        ...payload,
-      }),
+      body: JSON.stringify(forwardBody),
       signal: controller.signal,
     });
 
     const resText = await res.text();
     clearTimeout(t);
 
-    // Preserve n8n response if JSON; otherwise return as text
+    // coba parse JSON response dari n8n
     const maybeJson = safeJsonParse(resText);
-    const bodyOut = maybeJson.ok
+    const out = maybeJson.ok
       ? maybeJson.value
       : { ok: res.ok, status: res.status, text: resText };
 
     return {
       statusCode: res.status,
-      headers: baseHeaders({
-        "x-flow-proxy-version": VERSION,
-      }),
-      body: JSON.stringify(bodyOut),
+      headers: baseHeaders({ "x-flow-proxy-version": VERSION }),
+      body: JSON.stringify(out),
     };
   } catch (e) {
     clearTimeout(t);
+
     const msg =
       String(e)?.includes("AbortError")
         ? `Upstream timeout after ${timeoutMs}ms`
@@ -165,19 +177,14 @@ export const handler = async (event) => {
 
     return {
       statusCode: 502,
-      headers: baseHeaders({
-        "x-flow-proxy-version": VERSION,
-      }),
+      headers: baseHeaders({ "x-flow-proxy-version": VERSION }),
       body: JSON.stringify({
         ok: false,
         version: VERSION,
         error: "Failed to call n8n",
         detail: msg,
-        debug: {
-          envPresent: Boolean(envUrlRaw),
-          targetOverride: targetOverride || null,
-          chosenUrl,
-        },
+        envPresent: Boolean(envUrl),
+        chosenUrl,
       }),
     };
   }
