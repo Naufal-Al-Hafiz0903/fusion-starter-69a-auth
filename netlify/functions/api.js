@@ -1,13 +1,9 @@
 // netlify/functions/api.js
-// Pure Netlify Function handler (tanpa express)
-// Fitur:
-// - GET /api/health
-// - POST /api/auth/login  -> forward ke FLOW /webhook/api/auth/login
-// - POST /api/auth/signup -> forward ke FLOW /webhook/api/auth/signup
-// - Robust body parsing: JSON / form-urlencoded / raw string (tidak mudah gagal)
-// - CORS + OPTIONS
-// - Timeout upstream
-// - Debug optional: GET /api/health?debug=1
+// Single handler: /api/health, /api/auth/login, /api/auth/signup
+// Robust parsing: JSON, double-encoded JSON, single-quoted JSON, form-urlencoded, raw fallback
+// No 400 just because body can't be parsed (it will forward raw)
+
+const VERSION = "api-v8-2026-01-30";
 
 const DEFAULT_FLOW_BASE_URL = "https://flow.eraenterprise.id";
 const TIMEOUT_MS = 15000;
@@ -18,6 +14,22 @@ function corsHeaders() {
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   };
+}
+
+function normalizePath(event) {
+  const rawPath = event?.path || "/";
+  let path = rawPath;
+
+  // support /.netlify/functions/api/*
+  const fnPrefix = "/.netlify/functions/api";
+  if (path.startsWith(fnPrefix)) path = path.slice(fnPrefix.length);
+
+  // support /api/* (redirect)
+  if (path.startsWith("/api/")) path = path.slice(4);
+  if (path === "/api") path = "/";
+
+  if (!path.startsWith("/")) path = "/" + path;
+  return path;
 }
 
 function getRawBody(event) {
@@ -47,28 +59,55 @@ function parseFormUrlEncoded(raw) {
   }
 }
 
-function normalizePath(event) {
-  const rawPath = event?.path || "/";
-  let path = rawPath;
+// sanitasi: trim + buang quote pembungkus '...' atau "..."
+function sanitizeRaw(raw) {
+  let s = (raw || "").trim();
 
-  // support /.netlify/functions/api/*
-  const fnPrefix = "/.netlify/functions/api";
-  if (path.startsWith(fnPrefix)) path = path.slice(fnPrefix.length);
+  // buang BOM
+  if (s.charCodeAt(0) === 0xfeff) s = s.slice(1);
 
-  // support /api/* (redirect)
-  if (path.startsWith("/api/")) path = path.slice(4);
-  if (path === "/api") path = "/";
+  // jika body kebungkus single quotes (sering terjadi di windows/cmd)
+  if (s.length >= 2 && s.startsWith("'") && s.endsWith("'")) {
+    s = s.slice(1, -1).trim();
+  }
 
-  if (!path.startsWith("/")) path = "/" + path;
-  return path;
+  return s;
+}
+
+// parse robust -> object, kalau gagal -> { rawBody: ... }
+function parsePayload(event) {
+  const raw0 = getRawBody(event);
+  const raw = sanitizeRaw(raw0);
+
+  if (!raw) return { payload: {}, parsedAs: "empty" };
+
+  // 1) JSON normal
+  const j1 = safeJsonParse(raw);
+  if (j1.ok) {
+    // 2) kalau ternyata hasilnya string JSON (double-encoded), parse lagi
+    if (typeof j1.value === "string") {
+      const j2 = safeJsonParse(j1.value);
+      if (j2.ok) return { payload: j2.value ?? {}, parsedAs: "json-double" };
+      return { payload: { rawBody: raw0 }, parsedAs: "raw", parseError: j2.error };
+    }
+    return { payload: j1.value ?? {}, parsedAs: "json" };
+  }
+
+  // 3) form-urlencoded
+  const f = parseFormUrlEncoded(raw);
+  if (f.ok && Object.keys(f.value || {}).length > 0) {
+    return { payload: f.value, parsedAs: "form-urlencoded" };
+  }
+
+  // 4) fallback raw (JANGAN 400)
+  return { payload: { rawBody: raw0 }, parsedAs: "raw", parseError: j1.error };
 }
 
 async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    return res;
+    return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(t);
   }
@@ -78,36 +117,7 @@ async function proxyToFlow(event, flowPath) {
   const FLOW_BASE_URL = (process.env.FLOW_BASE_URL || DEFAULT_FLOW_BASE_URL).trim();
   const FLOW_API_KEY = (process.env.FLOW_API_KEY || "").trim();
 
-  const rawBody = getRawBody(event);
-  const contentType = (event?.headers?.["content-type"] || event?.headers?.["Content-Type"] || "")
-    .split(";")[0]
-    .trim()
-    .toLowerCase();
-
-  // Robust parse (tidak gampang error)
-  let payload = {};
-  let parsedAs = "empty";
-  let parseError = null;
-
-  if (rawBody) {
-    const j = safeJsonParse(rawBody);
-    if (j.ok) {
-      payload = j.value ?? {};
-      parsedAs = "json";
-    } else {
-      const f = parseFormUrlEncoded(rawBody);
-      if (f.ok && Object.keys(f.value || {}).length > 0) {
-        payload = f.value;
-        parsedAs = "form-urlencoded";
-      } else {
-        // terakhir: kirim raw
-        payload = { rawBody };
-        parsedAs = "raw";
-        parseError = j.error;
-      }
-    }
-  }
-
+  const { payload, parsedAs, parseError } = parsePayload(event);
   const upstreamUrl = `${FLOW_BASE_URL}${flowPath}`;
 
   try {
@@ -139,11 +149,11 @@ async function proxyToFlow(event, flowPath) {
       headers: { ...corsHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({
         ok: false,
+        version: VERSION,
         message: "Gateway error ke flow",
         detail: msg,
         meta: {
           upstreamUrl,
-          contentType: contentType || null,
           parsedAs,
           ...(parseError ? { parseError } : {}),
           flow_base_set: Boolean(process.env.FLOW_BASE_URL),
@@ -156,16 +166,13 @@ async function proxyToFlow(event, flowPath) {
 
 exports.handler = async (event) => {
   const headers = corsHeaders();
+  const method = event.httpMethod || "GET";
+  const path = normalizePath(event);
 
   // CORS preflight
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers, body: "" };
-  }
+  if (method === "OPTIONS") return { statusCode: 204, headers, body: "" };
 
-  const path = normalizePath(event);
-  const method = event.httpMethod || "GET";
-
-  // Health endpoint
+  // Health
   if (method === "GET" && path === "/health") {
     const debug = event?.queryStringParameters?.debug === "1";
     return {
@@ -173,6 +180,7 @@ exports.handler = async (event) => {
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         ok: true,
+        version: VERSION,
         service: "api",
         time: new Date().toISOString(),
         flow_base_set: Boolean(process.env.FLOW_BASE_URL),
@@ -194,22 +202,17 @@ exports.handler = async (event) => {
     return {
       statusCode: 405,
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ ok: false, message: `Method ${method} not allowed` }),
+      body: JSON.stringify({ ok: false, version: VERSION, message: `Method ${method} not allowed` }),
     };
   }
 
-  // Auth routes (sesuai tugas kamu)
-  if (path === "/auth/login") {
-    return proxyToFlow(event, "/webhook/api/auth/login");
-  }
-
-  if (path === "/auth/signup") {
-    return proxyToFlow(event, "/webhook/api/auth/signup");
-  }
+  // Auth endpoints
+  if (path === "/auth/login") return proxyToFlow(event, "/webhook/api/auth/login");
+  if (path === "/auth/signup") return proxyToFlow(event, "/webhook/api/auth/signup");
 
   return {
     statusCode: 404,
     headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({ ok: false, message: "Not Found", path, method }),
+    body: JSON.stringify({ ok: false, version: VERSION, message: "Not Found", path, method }),
   };
 };
