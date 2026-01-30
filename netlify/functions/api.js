@@ -1,14 +1,9 @@
-// netlify/functions/api.cjs
-const express = require("express");
-const serverless = require("serverless-http");
+@'
+import express from "express";
+import serverless from "serverless-http";
 
 const app = express();
 
-// ENV
-const FLOW_BASE_URL = process.env.FLOW_BASE_URL || "https://flow.eraenterprise.id";
-const FLOW_API_KEY = process.env.FLOW_API_KEY || "";
-
-// body parser
 app.use(express.json({ limit: "2mb" }));
 
 // CORS + preflight
@@ -20,21 +15,24 @@ app.use((req, res, next) => {
   next();
 });
 
-// HEALTH (ini harusnya tidak mungkin 502 kalau function sehat)
+// Health check
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "api", time: new Date().toISOString() });
 });
 
-// helper proxy (pakai fetch, aman karena kita paksa Node 18)
+// Proxy to flow
+const FLOW_BASE_URL = process.env.FLOW_BASE_URL || "https://flow.eraenterprise.id";
+const FLOW_API_KEY = process.env.FLOW_API_KEY || "";
+
 async function proxyToFlow(req, res, path) {
   try {
     const upstream = await fetch(`${FLOW_BASE_URL}${path}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(FLOW_API_KEY ? { "X-API-Key": FLOW_API_KEY } : {}),
+        ...(FLOW_API_KEY ? { "X-API-Key": FLOW_API_KEY } : {})
       },
-      body: JSON.stringify(req.body || {}),
+      body: JSON.stringify(req.body || {})
     });
 
     const text = await upstream.text();
@@ -45,14 +43,14 @@ async function proxyToFlow(req, res, path) {
     return res.status(502).json({
       ok: false,
       message: "Gateway error ke flow",
-      detail: String(e?.message || e),
+      detail: String(e?.message || e)
     });
   }
 }
 
-// ROUTES (tambahkan route lain kamu di sini TANPA DIHAPUS)
+// AUTH endpoints
 app.post("/auth/login", (req, res) => proxyToFlow(req, res, "/webhook/api/auth/login"));
 app.post("/auth/signup", (req, res) => proxyToFlow(req, res, "/webhook/api/auth/signup"));
 
-// export netlify handler
-module.exports.handler = serverless(app, { basePath: "/.netlify/functions/api" });
+export const handler = serverless(app, { basePath: "/.netlify/functions/api" });
+'@ | Set-Content -Encoding UTF8 netlify\functions\api.js
