@@ -3,11 +3,13 @@
   functions = "netlify/functions"
   publish = "dist/spa"
 
+[build.environment]
+  NODE_VERSION = "18"
 
 [functions]
-  external_node_modules = ["express"]
+  external_node_modules = ["express", "serverless-http"]
   node_bundler = "esbuild"
-  
+
 [[redirects]]
   force = true
   from = "/api/*"
