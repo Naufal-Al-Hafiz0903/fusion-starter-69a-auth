@@ -1,191 +1,150 @@
-// netlify/functions/flow-proxy.js
-// Revisi utama:
-// - Tidak lagi gagal kalau body bukan JSON (tidak return 400)
-// - Coba parse JSON, kalau gagal -> coba parse form-urlencoded, kalau gagal -> kirim rawBody
-// - Tetap forward ke n8n dengan payload yang SELALU JSON valid
-// - GET debug untuk cek versi + URL yang dipakai
-// - CORS + timeout + response pass-through aman
+// netlify/functions/flow-proxy.js (ESM)
+const VERSION = "flow-proxy-auth-v2-2026-01-31";
 
-const VERSION = "v4-2026-01-29-FIX";
-const DEFAULT_N8N_WEBHOOK_URL =
-  "https://flow.eraenterprise.id/webhook/eramed-clara-appsmith";
+const DEFAULT_FLOW_BASE_URL = "https://flow.eraenterprise.id";
+const DEFAULT_WEBHOOK_PATH = "/webhook/eramed-clara-appsmith";
 
-function baseHeaders(extra = {}) {
+function cors(origin) {
   return {
-    "content-type": "application/json; charset=utf-8",
-    "access-control-allow-origin": "*",
-    "access-control-allow-headers": "Content-Type, Authorization",
-    "access-control-allow-methods": "GET, POST, OPTIONS",
-    ...extra,
+    "Access-Control-Allow-Origin": origin || "*",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key, X-Requested-With",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   };
 }
 
-function safeJsonParse(text) {
+function json(headers, statusCode, payload) {
+  return {
+    statusCode,
+    headers: { ...headers, "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(payload),
+  };
+}
+
+function safeTrim(v) {
+  return (typeof v === "string" ? v : "").trim();
+}
+
+function parseJsonBody(event) {
+  if (!event?.body) return { ok: true, data: {} };
+
   try {
-    return { ok: true, value: JSON.parse(text) };
+    const raw = event.isBase64Encoded
+      ? Buffer.from(event.body, "base64").toString("utf8")
+      : event.body;
+
+    const ct = safeTrim(event?.headers?.["content-type"] || event?.headers?.["Content-Type"]);
+    if (ct.includes("application/json")) {
+      return { ok: true, data: JSON.parse(raw || "{}") };
+    }
+
+    // fallback: coba parse JSON walau content-type tidak tepat
+    return { ok: true, data: JSON.parse(raw || "{}") };
   } catch (e) {
-    return { ok: false, error: String(e) };
+    return { ok: false, error: "Invalid JSON body" };
   }
 }
 
-function getRawBody(event) {
-  if (!event?.body) return "";
-  if (event.isBase64Encoded) {
-    return Buffer.from(event.body, "base64").toString("utf8");
-  }
-  return event.body;
-}
-
-function getHeader(event, name) {
-  const h = event?.headers || {};
-  const key = Object.keys(h).find((k) => k.toLowerCase() === name.toLowerCase());
-  return key ? h[key] : "";
-}
-
-function parseFormUrlEncoded(raw) {
+async function fetchWithTimeout(url, options, ms = 15000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), ms);
   try {
-    const params = new URLSearchParams(raw);
-    const obj = {};
-    for (const [k, v] of params.entries()) obj[k] = v;
-    return { ok: true, value: obj };
-  } catch (e) {
-    return { ok: false, error: String(e) };
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(t);
   }
 }
 
 export const handler = async (event) => {
-  const method = event.httpMethod || "GET";
+  const origin = event?.headers?.origin || event?.headers?.Origin || "*";
+  const method = event?.httpMethod || "GET";
+  const headers = cors(origin);
 
-  // CORS preflight
-  if (method === "OPTIONS") {
-    return { statusCode: 204, headers: baseHeaders(), body: "" };
-  }
+  if (method === "OPTIONS") return { statusCode: 204, headers, body: "" };
 
-  // target URL (ENV atau fallback)
-  const envUrl = (process.env.N8N_WEBHOOK_URL || "").trim();
-  const chosenUrl = envUrl || DEFAULT_N8N_WEBHOOK_URL;
+  const FLOW_BASE_URL = safeTrim(process.env.FLOW_BASE_URL) || DEFAULT_FLOW_BASE_URL;
+  const FLOW_WEBHOOK_PATH = safeTrim(process.env.FLOW_WEBHOOK_PATH) || DEFAULT_WEBHOOK_PATH;
+  const FLOW_API_KEY = safeTrim(process.env.FLOW_API_KEY);
 
-  // GET: health check
   if (method === "GET") {
-    const debug = event?.queryStringParameters?.debug === "1";
-    return {
-      statusCode: 200,
-      headers: baseHeaders({ "x-flow-proxy-version": VERSION }),
-      body: JSON.stringify({
-        ok: true,
-        version: VERSION,
-        message: "flow-proxy is running. Send POST to forward to n8n.",
-        debug: debug
-          ? {
-              envPresent: Boolean(envUrl),
-              envUrlRaw: envUrl || null,
-              chosenUrl,
-            }
-          : undefined,
-      }),
-    };
+    return json(headers, 200, {
+      ok: true,
+      version: VERSION,
+      flowBase: FLOW_BASE_URL,
+      webhookPath: FLOW_WEBHOOK_PATH,
+      hasKey: Boolean(FLOW_API_KEY),
+    });
   }
 
-  // Only POST
   if (method !== "POST") {
-    return {
-      statusCode: 405,
-      headers: baseHeaders({ "x-flow-proxy-version": VERSION }),
-      body: JSON.stringify({
-        ok: false,
-        version: VERSION,
-        error: `Method ${method} not allowed. Use POST.`,
-      }),
-    };
+    return json(headers, 405, { ok: false, message: "Method not allowed" });
   }
 
-  // Ambil raw body + content-type
-  const rawBody = getRawBody(event);
-  const contentTypeRaw = getHeader(event, "content-type") || "";
-  const contentType = contentTypeRaw.split(";")[0].trim().toLowerCase();
+  const parsed = parseJsonBody(event);
+  if (!parsed.ok) return json(headers, 400, { ok: false, message: parsed.error });
 
-  // Parse body dengan fallback (TIDAK error 400 lagi)
-  let parsedAs = "empty";
-  let payload = {};
-  let parseError = null;
+  // payload dari frontend
+  const body = parsed.data || {};
+  // minimal: action + data
+  // contoh: { action: "login", data: { email, password } }
+  const action = safeTrim(body.action);
+  const data = body.data ?? body; // fallback: kalau frontend langsung kirim {email,password}
 
-  if (rawBody) {
-    // 1) coba JSON dulu
-    const j = safeJsonParse(rawBody);
-    if (j.ok) {
-      payload = j.value ?? {};
-      parsedAs = "json";
-    } else {
-      // 2) coba form-urlencoded
-      const f = parseFormUrlEncoded(rawBody);
-      if (f.ok && Object.keys(f.value || {}).length > 0) {
-        payload = f.value;
-        parsedAs = "form-urlencoded";
-      } else {
-        // 3) gagal semua -> kirim raw
-        payload = { rawBody };
-        parsedAs = "raw";
-        parseError = j.error;
-      }
-    }
+  if (!action) {
+    return json(headers, 400, { ok: false, message: "Missing `action` (login/signup/social)" });
   }
 
-  // Forward ke n8n (SELALU JSON valid)
-  const controller = new AbortController();
-  const timeoutMs = 15000;
-  const t = setTimeout(() => controller.abort(), timeoutMs);
+  const targetUrl = `${FLOW_BASE_URL}${FLOW_WEBHOOK_PATH}`;
 
   try {
-    const forwardBody = {
+    const upstreamHeaders = {
+      "Content-Type": "application/json",
+      ...(FLOW_API_KEY ? { "X-API-Key": FLOW_API_KEY } : {}),
+    };
+
+    const upstreamBody = {
       source: "netlify",
       version: VERSION,
-      receivedAt: new Date().toISOString(),
-      contentType: contentType || null,
-      parsedAs,
-      ...(parseError ? { parseError } : {}),
-      payload,
+      action,
+      data,
+      meta: {
+        ip:
+          event?.headers?.["x-forwarded-for"] ||
+          event?.headers?.["client-ip"] ||
+          null,
+        ua: event?.headers?.["user-agent"] || null,
+      },
     };
 
-    const res = await fetch(chosenUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(forwardBody),
-      signal: controller.signal,
+    const res = await fetchWithTimeout(
+      targetUrl,
+      {
+        method: "POST",
+        headers: upstreamHeaders,
+        body: JSON.stringify(upstreamBody),
+      },
+      20000
+    );
+
+    const text = await res.text();
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = { raw: text };
+    }
+
+    return json(headers, 200, {
+      ok: res.ok,
+      status: res.status,
+      target: targetUrl,
+      result: payload,
     });
-
-    const resText = await res.text();
-    clearTimeout(t);
-
-    // coba parse JSON response dari n8n
-    const maybeJson = safeJsonParse(resText);
-    const out = maybeJson.ok
-      ? maybeJson.value
-      : { ok: res.ok, status: res.status, text: resText };
-
-    return {
-      statusCode: res.status,
-      headers: baseHeaders({ "x-flow-proxy-version": VERSION }),
-      body: JSON.stringify(out),
-    };
-  } catch (e) {
-    clearTimeout(t);
-
-    const msg =
-      String(e)?.includes("AbortError")
-        ? `Upstream timeout after ${timeoutMs}ms`
-        : String(e);
-
-    return {
-      statusCode: 502,
-      headers: baseHeaders({ "x-flow-proxy-version": VERSION }),
-      body: JSON.stringify({
-        ok: false,
-        version: VERSION,
-        error: "Failed to call n8n",
-        detail: msg,
-        envPresent: Boolean(envUrl),
-        chosenUrl,
-      }),
-    };
+  } catch (err) {
+    return json(headers, 502, {
+      ok: false,
+      message: "Proxy failed to reach flow",
+      error: String(err?.message || err),
+    });
   }
 };

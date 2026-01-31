@@ -1,17 +1,23 @@
 [build]
-  command = "npm run build:client"
   functions = "netlify/functions"
+  command = "npm run build"
   publish = "dist/spa"
 
-[build.environment]
-  NODE_VERSION = "18"
-
-[functions]
-  external_node_modules = ["express", "serverless-http"]
-  node_bundler = "esbuild"
+# ===== API routes (jangan ketimpa redirect SPA) =====
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+  force = true
 
 [[redirects]]
-  force = true
-  from = "/api/*"
+  from = "/api"
+  to = "/.netlify/functions/api"
   status = 200
-  to = "/.netlify/functions/api/:splat"
+  force = true
+
+# ===== SPA fallback (React Router) =====
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
