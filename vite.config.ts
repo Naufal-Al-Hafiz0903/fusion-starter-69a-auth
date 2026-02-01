@@ -7,7 +7,7 @@ const repo = "fusion-starter-69a-auth";
 export default defineConfig({
   plugins: [react()],
 
-  // GitHub Pages: wajib subpath repo
+  // GitHub Pages ada di /<repo>/
   base: `/${repo}/`,
 
   resolve: {
