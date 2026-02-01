@@ -25,16 +25,11 @@ jobs:
         with:
           node-version: 20
 
-      - name: Enable pnpm (Corepack)
-        run: |
-          corepack enable
-          corepack prepare pnpm@9.15.4 --activate
-
       - name: Install deps
-        run: pnpm install --frozen-lockfile
+        run: npm install
 
       - name: Build SPA
-        run: pnpm run build:client || pnpm run build
+        run: npm run build
 
       - name: SPA fallback + nojekyll
         run: |
