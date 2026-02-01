@@ -1,55 +1,44 @@
-name: Deploy to GitHub Pages
+import "./global.css";
 
-on:
-  push:
-    branches: ["main"]
+import { createRoot } from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { HashRouter, Routes, Route } from "react-router-dom";
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Toaster } from "@/components/ui/toaster";
+import { Toaster as Sonner } from "@/components/ui/sonner";
 
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
+import Splash from "./pages/Splash";
+import Onboarding from "./pages/Onboarding";
+import Auth from "./pages/Auth";
+import Login from "./pages/Login";
+import SignUp from "./pages/SignUp";
+import ForgotPassword from "./pages/ForgotPassword";
+import NotFound from "./pages/NotFound";
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+const queryClient = new QueryClient();
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <Toaster />
+        <Sonner />
 
-      - name: Install deps
-        run: |
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+        <HashRouter>
+          <Routes>
+            <Route path="/" element={<Splash />} />
+            <Route path="/onboarding" element={<Onboarding />} />
+            <Route path="/auth" element={<Auth />} />
+            <Route path="/login" element={<Login />} />
+            <Route path="/signup" element={<SignUp />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </HashRouter>
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
 
-      - name: Build SPA
-        run: npm run build:client
-
-      - name: Ensure 404 + nojekyll
-        run: |
-          # kalau kamu tidak punya public/404.html, ini tetap bikin fallback
-          if [ ! -f dist/spa/404.html ]; then cp dist/spa/index.html dist/spa/404.html; fi
-          touch dist/spa/.nojekyll
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist/spa
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-    steps:
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v4
+createRoot(document.getElementById("root")!).render(<App />);

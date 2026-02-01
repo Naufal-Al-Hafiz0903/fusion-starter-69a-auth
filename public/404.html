@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="robots" content="noindex" />
+    <title>Redirecting…</title>
+    <script>
+      (function () {
+        var repo = "/fusion-starter-69a-auth";
+        var l = window.location;
+
+        var path = l.pathname.startsWith(repo) ? l.pathname.slice(repo.length) : l.pathname;
+        if (!path) path = "/";
+
+        var target = repo + "/#" + path;
+        if (l.search) target += l.search;
+
+        l.replace(target);
+      })();
+    </script>
+  </head>
+  <body>Redirecting…</body>
+</html>
