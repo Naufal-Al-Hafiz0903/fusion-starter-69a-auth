@@ -1,41 +1,54 @@
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react-swc";
-import path from "path";
-import type { Plugin } from "vite";
+name: Deploy to GitHub Pages
 
-const REPO = "fusion-starter-69a-auth";
+on:
+  push:
+    branches: ["main"]
 
-export default defineConfig(({ command }) => ({
-  base: process.env.VITE_BASE ?? (command === "build" ? `/${REPO}/` : "/"),
-  server: {
-    host: "::",
-    port: 8080,
-    fs: {
-      allow: ["./client", "./shared"],
-      deny: [".env", ".env.*", "*.{crt,pem}", "**/.git/**", "server/**"],
-    },
-  },
-  build: {
-    outDir: "dist/spa",
-    emptyOutDir: true,
-  },
-  plugins: [react(), ...(command === "serve" ? [expressPlugin()] : [])],
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./client"),
-      "@shared": path.resolve(__dirname, "./shared"),
-    },
-  },
-}));
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
-function expressPlugin(): Plugin {
-  return {
-    name: "express-plugin",
-    apply: "serve",
-    async configureServer(viteServer) {
-      const mod = await import("./server");
-      const app = mod.createServer();
-      viteServer.middlewares.use(app);
-    },
-  };
-}
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable pnpm (Corepack)
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.4 --activate
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SPA
+        run: pnpm run build:client
+        env:
+          VITE_BASE: "/fusion-starter-69a-auth/"
+
+      - name: SPA fallback
+        run: cp dist/spa/index.html dist/spa/404.html
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/spa
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy
+        uses: actions/deploy-pages@v4
