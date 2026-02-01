@@ -36,7 +36,6 @@ jobs:
       - name: Build SPA
         run: pnpm run build:client || pnpm run build
 
-      # Supaya URL /onboarding tidak dapat "File not found" dari GitHub Pages
       - name: SPA fallback + nojekyll
         run: |
           cp dist/spa/index.html dist/spa/404.html
