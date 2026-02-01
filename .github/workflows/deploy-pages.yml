@@ -24,13 +24,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+          cache: "pnpm"
 
-      - name: Install
-        run: npm ci
+      - name: Enable Corepack (pnpm)
+        run: corepack enable
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
 
       - name: Build SPA
-        run: npm run build:client
+        run: pnpm run build:client
         env:
           VITE_BASE: "/fusion-starter-69a-auth/"
 
