@@ -1,25 +1,55 @@
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react-swc";
-import path from "path";
+name: Deploy to GitHub Pages
 
-const repo = "fusion-starter-69a-auth";
+on:
+  push:
+    branches: ["main"]
 
-export default defineConfig({
-  plugins: [react()],
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
-  // GitHub Pages ada di /<repo>/
-  base: `/${repo}/`,
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./client"),
-      "@shared": path.resolve(__dirname, "./shared"),
-    },
-  },
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  build: {
-    outDir: "dist/spa",
-    emptyOutDir: true,
-    assetsDir: "assets",
-  },
-});
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable pnpm (Corepack)
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.4 --activate
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SPA
+        run: pnpm run build:client || pnpm run build
+
+      # Supaya URL /onboarding tidak dapat "File not found" dari GitHub Pages
+      - name: SPA fallback + nojekyll
+        run: |
+          cp dist/spa/index.html dist/spa/404.html
+          touch dist/spa/.nojekyll
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/spa
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy
+        uses: actions/deploy-pages@v4
