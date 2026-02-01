@@ -3,9 +3,12 @@ import react from "@vitejs/plugin-react-swc";
 import path from "path";
 import type { Plugin } from "vite";
 
-// https://vitejs.dev/config/
-export default defineConfig(({ mode }) => ({
-  base: "/",
+const REPO = "fusion-starter-69a-auth";
+
+export default defineConfig(({ command }) => ({
+  // GitHub Pages pakai subpath /<repo>/
+  base: process.env.VITE_BASE ?? (command === "build" ? `/${REPO}/` : "/"),
+
   server: {
     host: "::",
     port: 8080,
@@ -14,11 +17,18 @@ export default defineConfig(({ mode }) => ({
       deny: [".env", ".env.*", "*.{crt,pem}", "**/.git/**", "server/**"],
     },
   },
+
   build: {
     outDir: "dist/spa",
     emptyOutDir: true,
+    assetsDir: "assets", // penting: pastikan asset berada di /assets
   },
-  plugins: [react(), expressPlugin()],
+
+  plugins: [
+    react(),
+    ...(command === "serve" ? [expressPlugin()] : []), // hanya dev
+  ],
+
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./client"),
@@ -30,13 +40,10 @@ export default defineConfig(({ mode }) => ({
 function expressPlugin(): Plugin {
   return {
     name: "express-plugin",
-    apply: "serve", // hanya jalan saat dev (vite serve)
+    apply: "serve",
     async configureServer(viteServer) {
-      // IMPORTANT: lazy import supaya Netlify build (SPA) tidak kebaca file server
       const mod = await import("./server");
       const app = mod.createServer();
-
-      // pasang Express sebagai middleware ke Vite dev server
       viteServer.middlewares.use(app);
     },
   };

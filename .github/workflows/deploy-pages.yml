@@ -24,11 +24,18 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+<<<<<<< HEAD
 
       - name: Enable pnpm (Corepack)
         run: |
           corepack enable
           corepack prepare pnpm@9.15.4 --activate
+=======
+          cache: "pnpm"
+
+      - name: Enable Corepack (pnpm)
+        run: corepack enable
+>>>>>>> c35047e (Fix Vite base for GitHub Pages)
 
       - name: Install deps
         run: pnpm install --frozen-lockfile
