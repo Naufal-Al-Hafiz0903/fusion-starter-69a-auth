@@ -18,8 +18,7 @@ import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
 
-// GitHub Pages: BASE_URL biasanya "/fusion-starter-69a-auth/"
-// React Router basename lebih stabil tanpa trailing slash
+// BASE_URL biasanya "/fusion-starter-69a-auth/" → buang trailing slash
 const basename = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 function App() {

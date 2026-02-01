@@ -1,49 +1,25 @@
-name: Deploy to GitHub Pages
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react-swc";
+import { fileURLToPath, URL } from "node:url";
 
-on:
-  push:
-    branches: ["main"]
+const repo = "fusion-starter-69a-auth";
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+export default defineConfig({
+  plugins: [react()],
 
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
+  // GitHub Pages ada di /<repo>/
+  base: `/${repo}/`,
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./client", import.meta.url)),
+      "@shared": fileURLToPath(new URL("./shared", import.meta.url)),
+    },
+  },
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install deps
-        run: npm install
-
-      - name: Build SPA
-        run: npm run build
-
-      - name: SPA fallback + nojekyll
-        run: |
-          cp dist/spa/index.html dist/spa/404.html
-          touch dist/spa/.nojekyll
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist/spa
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy
-        uses: actions/deploy-pages@v4
+  build: {
+    outDir: "dist/spa",
+    emptyOutDir: true,
+    assetsDir: "assets",
+  },
+});
