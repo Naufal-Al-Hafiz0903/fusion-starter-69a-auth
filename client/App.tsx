@@ -1,58 +1,48 @@
-name: Deploy to GitHub Pages
+import "./global.css";
 
-on:
-  push:
-    branches: ["main"]
+import { createRoot } from "react-dom/client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Toaster } from "@/components/ui/toaster";
+import { Toaster as Sonner } from "@/components/ui/sonner";
 
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
+import Splash from "./pages/Splash";
+import Onboarding from "./pages/Onboarding";
+import Auth from "./pages/Auth";
+import Login from "./pages/Login";
+import SignUp from "./pages/SignUp";
+import ForgotPassword from "./pages/ForgotPassword";
+import NotFound from "./pages/NotFound";
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+const queryClient = new QueryClient();
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+// GitHub Pages: BASE_URL biasanya "/fusion-starter-69a-auth/"
+// React Router basename lebih stabil tanpa trailing slash
+const basename = import.meta.env.BASE_URL.replace(/\/$/, "");
 
-      - name: Enable pnpm (Corepack)
-        run: |
-          corepack enable
-          corepack prepare pnpm@9.15.4 --activate
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <Toaster />
+        <Sonner />
 
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
+        <BrowserRouter basename={basename}>
+          <Routes>
+            <Route path="/" element={<Splash />} />
+            <Route path="/onboarding" element={<Onboarding />} />
+            <Route path="/auth" element={<Auth />} />
+            <Route path="/login" element={<Login />} />
+            <Route path="/signup" element={<SignUp />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </BrowserRouter>
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
 
-      # build client (kalau build:client tidak ada, fallback ke build)
-      - name: Build SPA
-        run: pnpm run build:client || pnpm run build
-
-      # SPA fallback untuk GitHub Pages:
-      # 1) 404.html harus ada, supaya deep-link tidak dapat GitHub 404
-      # 2) .nojekyll biar Pages tidak ganggu file build
-      - name: SPA fallback + nojekyll
-        run: |
-          cp dist/spa/index.html dist/spa/404.html
-          touch dist/spa/.nojekyll
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist/spa
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy
-        uses: actions/deploy-pages@v4
+createRoot(document.getElementById("root")!).render(<App />);
